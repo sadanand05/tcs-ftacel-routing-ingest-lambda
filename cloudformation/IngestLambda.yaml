@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: 'Deploys a Lambda function to process ingest data'
+
+Parameters:
+
+  StageName:
+    Type: String
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: 'The stage of deployment'
+
+  ThreadCount:
+    Type: String
+    Default: '5'
+    Description: 'The thread count for the ingest processor'
+    AllowedPattern: '^[0-9]+$'
+
+Resources:
+
+  IngestLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${StageName}-ftacel-ingest-lambda'
+      Handler: 'com.foxtel.ingest.lambda.IngestLambda'
+      Runtime: java8
+      Timeout: 900
+      MemorySize: 1024
+      CodeUri: ../target/customeringest-1.0.0.jar
+      Role:
+        Fn::ImportValue:
+          !Sub '${StageName}-ftacel-ingest-lambda-role-arn'
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            BatchSize: 1
+            Enabled: true
+            Queue: !GetAtt 'IngestBucketQueue.Arn'
+      Environment:
+        Variables:
+          REGION: !Sub '${AWS::Region}'
+          CUSTOMER_TABLE_NAME:
+            Fn::ImportValue:
+              !Sub '${StageName}-ftacel-ingest-customers-table'
+          INGEST_TABLE_NAME:
+            Fn::ImportValue:
+              !Sub '${StageName}-ftacel-ingest-ingests-table'
+          SECRETS_MANAGER_KEY_ARN:
+            Fn::ImportValue:
+              !Sub '${StageName}-ftacel-ingest-gpgkey-arn'
+          SECRETS_MANAGER_PASSPHRASE_ARN:
+            Fn::ImportValue:
+              !Sub '${StageName}-ftacel-ingest-gpgsecret-arn'
+          THREAD_COUNT: !Sub '${ThreadCount}'
+
+
+  IngestBucketQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MaximumMessageSize: 262144
+      MessageRetentionPeriod: 1209600
+      QueueName: !Sub '${StageName}-ftacel-ingest-queue'
+      VisibilityTimeout: 3600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestBucketRedriveQueue.Arn
+        maxReceiveCount: 1
+
+  IngestBucketRedriveQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MaximumMessageSize: 262144
+      MessageRetentionPeriod: 1209600
+      QueueName: !Sub '${StageName}-ftacel-ingest-redrive'
+      VisibilityTimeout: 960
+
+  IngestBucketQueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !GetAtt 'IngestBucketQueue.Arn'
+      Protocol: sqs
+      RawMessageDelivery: true
+      TopicArn:
+        Fn::ImportValue:
+          !Sub '${StageName}-ftacel-ingest-sns-topic-arn'
+
+  IngestBucketQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref IngestBucketQueue
+      PolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal: "*"
+          Action: sqs:SendMessage
+          Resource: "*"
+          Condition:
+            ArnEquals:
+              aws:SourceArn:
+                Fn::ImportValue:
+                  !Sub '${StageName}-ftacel-ingest-sns-topic-arn'
