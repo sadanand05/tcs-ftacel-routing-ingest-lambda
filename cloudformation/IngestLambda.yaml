@@ -29,9 +29,7 @@ Resources:
       Runtime: java8
       Timeout: 900
       MemorySize: 1024
-      Code:
-         S3Bucket : sc-440678296209-pp-7yzfyq7ful7ok-outputbucket-33rr8w7xrfw8
-         S3Key : latest-repo.zip
+      CodeUri: ../target/customeringest-1.0.0.jar    
       
       Role:
         Fn::ImportValue:
