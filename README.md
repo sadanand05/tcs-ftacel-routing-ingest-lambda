@@ -5,19 +5,35 @@ customer data and make this data available to Amazon Connect for dynamic custome
 
 ## Building
 
-The system relies on the Java JDK 1.8 and Apache Maven for the build process, these must be installed 
-on the build machine. 
+The system relies on the Java JDK 1.8 and Apache Maven for the build process, these must be installed on the build machine. 
 
 ## Deploying
 
-The templates rely on a StageName parameter which can be set to dev, test or prod, this determines the naming
-for the assets deployed. 
+The templates rely on a StageName parameter which can be set to dev, test or prod, this determines the naming for the assets deployed. 
 
-The system uses three CloudFormation templates that must be deployed in the correct order:
+The system relies on the Infrastructure and LambdaRoles templates and these must be deployed prior. 
 
-    1. cloudformation/Infrastructure.yaml
-    2. cloudformation/LambdaRoles.yaml
-    3. cloudformation/IngestLambda.yaml
+It uses the AWS::Serverless-2016-10-31 transform and relies on the system being built with maven:
+
+    mvn package
+
+and packaged into S3:
+
+    aws cloudformation package \
+        --template-file cloudformation/IngestLambda.yaml \
+        --output-template-file cloudformation/IngestLambda-prepared.yaml \
+        --s3-bucket <deploymentBucket> \
+        --s3-prefix applications/ftacel/ingest/lambda \
+        --region ap-southeast-2 \
+        --force-upload
+
+And finally deployed with CloudFormation:
+
+    aws cloudformation deploy \
+        --template-file cloudformation/IngestLambda-prepared.yaml \
+        --region ap-southeast-2 \
+        --stack-name dev-ftacel-ingest-lambda \
+        --parameter-overrides StageName=dev ThreadCount=5
     
  Sample deployment scripts are provided (remove the --profile references when deploying via Code Pipeline)
  
