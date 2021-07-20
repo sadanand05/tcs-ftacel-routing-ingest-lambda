@@ -21,6 +21,7 @@ import com.foxtel.ingest.aws.s3.S3Manager;
 import com.foxtel.ingest.aws.s3.S3Path;
 import com.foxtel.ingest.aws.secrets.SecretsHelper;
 import com.foxtel.ingest.constant.IngestIO;
+import com.foxtel.ingest.constant.IngestIO.COMPARE_STATUS;
 import com.foxtel.ingest.exception.IngestException;
 import com.foxtel.ingest.exception.IngestRuntimeException;
 import com.foxtel.ingest.json.JsonUtils;
@@ -95,6 +96,7 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
     private List<IngestWorker> workers = new ArrayList<>();
     private List<Thread> threads = new ArrayList<>();
     private LinkedBlockingQueue<WriteRequest> inbound = null;
+    private List<S3Object> s3ObjectsList = new ArrayList<>();
 
     private static final String VERSION = IngestIO.VERSION;
     
@@ -106,9 +108,9 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
     /**
      * Flags for record compare with current and last processed files record
      */
-    private String lastProcessedIngestS3File = "";
-    private String currentProcessingIngestS3File = "";
-    private String lastCompareStatus = "";
+    private S3Path lastProcessedIngestS3FilePath = null;
+    private S3Path currentProcessingIngestS3FilePath = null;
+    private Enum Last_Compare_Status = null;
     private RecordEntityVO ingestAuditrecordEntityVO = null;
     private int recordCount = 0;
     private int recordInsertCount = 0;
@@ -160,19 +162,9 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
             }
         }
 
-        IngestLogger.info("Ingest procssing is complete. Audit table is getting updated");
-        try {
-			
-        	insertIngestTableWithLatestProcessedFileInfo();
-			resetCompareVariable();
-			IngestLogger.info("Ingest audit history is updated");
-		} catch (IngestException e) {
-			IngestLogger.error("Failed to process ingest audit", e);
-            throw new IngestRuntimeException("Failed to process audit", e);
-		}finally {
-			long endTime = Calendar.getInstance().getTimeInMillis();
-			IngestLogger.info("******* File Ingest process ended. Time taken"+(endTime-startTime)+" ms *******");
-		}
+        long endTime = Calendar.getInstance().getTimeInMillis();
+		IngestLogger.info("******* File Ingest process ended. Time taken"+(endTime-startTime)+" ms *******");
+		
         return null;
     }
 
@@ -232,11 +224,14 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
     {
         String bucket = record.getS3().getBucket().getName();
         String key = record.getS3().getObject().getKey();
-        currentProcessingIngestS3File = key;
-        processObject(new S3Path(bucket, key));
+        currentProcessingIngestS3FilePath = new S3Path(bucket, key);
+        
+        inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.READY.toString()); //Insert new status with Ready in Audit ingest table
+        
+        processObject(currentProcessingIngestS3FilePath);
     }
 
-    /**
+   /**
      * Processes an object
      * @param inputPath the S3 input location
      */
@@ -245,8 +240,8 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
         if (!inputPath.getKey().endsWith(".csv.gpg"))
         {
             IngestLogger.info("Skipping object which is not an encrypted CSV file: " + inputPath);
-            ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.STATUS_UN_PROCESSED+"_"+currentProcessingIngestS3File);
-            ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3File);
+            ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.FILE_AUDIT_STATUS.UNPROCESSED.toString()+"_"+CommonUtil.getUUID());
+            ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, inputPath.toString());
             return;
         }
 
@@ -259,49 +254,81 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
         try (S3Object s3Object = s3Manager.getObject(inputPath))
         {
             IngestLogger.info("Found object length: " + s3Object.getObjectMetadata().getContentLength() + " bytes");
+            s3ObjectsList.add(s3Object);
             
             getLatestProcessedIngestFileInfo(); // Get the Latest processed file information from DB
             
             if(!isFirstTimeIngest) 
             {
-            	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.STATUS_ARCHIVE+"_"+lastProcessedIngestS3File);
-            	processedFileReader =  loadBufferReaderFromS3Bucket(inputPath.getBucket(), lastProcessedIngestS3File);
+            	//ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.STATUS_ARCHIVE+"_"+lastProcessedIngestS3FilePath.getKey());
+            	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.FILE_AUDIT_STATUS.ARCHIVE.toString()+"_"+CommonUtil.getUUID());
+            	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_STATUS, IngestIO.FILE_AUDIT_STATUS.ARCHIVE.toString());
+            	processedFileReader =  loadBufferReaderFromS3Bucket(lastProcessedIngestS3FilePath);
             }
             else 
             {
-            	lastCompareStatus = IngestIO.DB_OPERATION_INSERT;
-            	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.STATUS_CURRENT);
-            	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3File);
+            	Last_Compare_Status = COMPARE_STATUS.INSERT;
+            	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.FILE_AUDIT_STATUS.CURRENT.toString());
+            	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_STATUS, IngestIO.FILE_AUDIT_STATUS.COMPLETED.toString());
+            	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, inputPath.toString());
             }
-             
+            
+            //Insert new status with Running in Audit ingest table
+            inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.RUNNING.toString());
+            
             processStream(inputPath, s3Object.getObjectContent());
+            
+            //Insert new status with Running in Audit ingest table
+            inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.PROCESSED.toString());
+            
+            IngestLogger.info("Ingest procssing is complete. Audit table is getting updated");
+            
+            processAuditTable();
+            
         }
         catch (IngestException e)
         {
-        	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.STATUS_UN_PROCESSED+"_"+currentProcessingIngestS3File);
-            ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3File);
+        	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.FILE_AUDIT_STATUS.ERROR+"_"+currentProcessingIngestS3FilePath.getKey());
+            ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3FilePath.toString());
+            inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.ERROR.toString());
             throw e;
         }
         catch (Throwable t)
         {
-        	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.STATUS_UN_PROCESSED+"_"+currentProcessingIngestS3File);
-            ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3File);
+        	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.FILE_AUDIT_STATUS.ERROR+"_"+currentProcessingIngestS3FilePath.getKey());
+            ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3FilePath.toString());
+            inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.ERROR.toString());
             throw new IngestException("Failed to ingest: " + inputPath, t);
         }
-
-        long end = System.currentTimeMillis();
-
-        IngestLogger.info(String.format("Ingestion completed in: %d millis", (end - start)));
+        finally
+        {
+        	s3ObjectsList.forEach(s3Object-> {
+        		if(null!=s3Object) 
+        		{ 
+        			try 
+        			{
+        				s3Object.close();
+        			}
+        			catch (IOException e) 
+        			{
+					IngestLogger.error("Could not close S3Obejct", e);
+        			}
+        		}
+        	});
+        	long end = System.currentTimeMillis();
+            IngestLogger.info(String.format("Ingestion completed in: %d millis", (end - start)));
+        }
+        
     }
 
-    /**
+	/**
      * Processes an S3 stream, while the input format is a simple non-quoted CSV with a header
      * use a simple parser for performance.
      * This fixes an issue with commons-csv that was causing the stream parse to fail with an MDC
      * error if the CSV was not terminated with extra new line character. Something to do with
      * over-reading the stream perhaps? The same issue arose if I used readLine(), Josh
      */
-    private void processStream(final S3Path inputPath, final S3ObjectInputStream in) throws IngestException
+    private void processStream (final S3Path inputPath, final S3ObjectInputStream in) throws IngestException
     {
         int itemCount = 0;
 
@@ -386,7 +413,7 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
      * @throws IngestException thrown on failure
      * @throws IOException 
      */
-    private boolean processLine(String line, String [] columns) throws IngestException, IOException
+    private boolean processLine (String line, String [] columns) throws IngestException, IOException
     {
     	if (StringUtils.isBlank(line))
         {
@@ -402,18 +429,15 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
 
         String accountId = values[IngestIO.INDEX_ACCOUNTID];
         
-        if(!isFirstTimeIngest)
+        if (!isFirstTimeIngest )
         	compareRecordByAccountIdForDeltaChange(accountId, line);
-        if(lastCompareStatus.equals(IngestIO.DB_OPERATION_INSERT) || lastCompareStatus.equals(IngestIO.DB_OPERATION_UPDATE)) 
+        if (IngestIO.COMPARE_STATUS.INSERT.equals(Last_Compare_Status) || 
+        		IngestIO.COMPARE_STATUS.UPDATE.equals(Last_Compare_Status ))
         {
-        	if(lastCompareStatus.equals(IngestIO.DB_OPERATION_INSERT)) 
-        	{
-        		recordInsertCount++;
-        	}
-        	else 
-        	{
-        		recordUpdateCount++;
-        	}
+			/*
+			 * if (lastCompareStatus.equals(IngestIO.DB_OPERATION_INSERT) ) {
+			 * recordInsertCount++; } else { recordUpdateCount++; }
+			 */
         	Map<String, AttributeValue> item = new HashMap<>();
             item.put(IngestIO.COLUMN_ACCOUNTID, new AttributeValue().withS(values[IngestIO.INDEX_ACCOUNTID]));
 
@@ -444,7 +468,7 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
         	
         	
         }
-        else if(lastCompareStatus.equals(IngestIO.DB_OPERATION_NOACTION)) 
+        else if (IngestIO.COMPARE_STATUS.NOACTION.equals(Last_Compare_Status)) 
         {
         	recordNoChangeCount++;
         }
@@ -465,7 +489,8 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
             final InMemoryKeyring keyring = KeyringConfigs.forGpgExportedKeys(KeyringConfigCallbacks.withPassword(passphrase));
             keyring.addSecretKey(privateKey.getBytes(StandardCharsets.US_ASCII));
             return keyring;
-        } catch (Throwable t)
+        } 
+        catch (Throwable t)
         {
             throw new IngestException("Failed to load private key", t);
         }
@@ -537,7 +562,7 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
      * Sleeps for the requested millis
      * @param millis the number of milliseconds to sleep for
      */
-    private void sleepFor(long millis)
+    private void sleepFor (long millis)
     {
         try
         {
@@ -556,18 +581,18 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
         this.errored = true;
     }
 
-    public void getLatestProcessedIngestFileInfo() throws IngestException
+    public void getLatestProcessedIngestFileInfo () throws IngestException
     {
         HashMap<String,AttributeValue> keyAttribute = new HashMap<String,AttributeValue>();
-        keyAttribute.put(IngestIO.COLUMN_INGEST_ID, new AttributeValue(IngestIO.STATUS_CURRENT));
-        
-        try {
+        keyAttribute.put(IngestIO.COLUMN_INGEST_ID, new AttributeValue(IngestIO.FILE_AUDIT_STATUS.CURRENT.toString()));
+        try 
+        {
         	GetItemRequest getItemRequest =  new GetItemRequest()
                     .withKey(keyAttribute)
                     .withTableName(ingestTableName);
             
             Map<String,AttributeValue> returned_item = dynamoDB.getItem(ingestTableName, getItemRequest);
-            if(null == returned_item || returned_item.isEmpty()) 
+            if (null == returned_item || returned_item.isEmpty()) 
             {
             	isFirstTimeIngest = true;
             	IngestIO.COLUMN_AUDIT_INGEST_TABLE.forEach((column)->ingestAuditrecordEntityVO.getRecords().put(column, IngestIO.VALUE_HYPHEN));
@@ -575,28 +600,44 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
             else 
             {
             	isFirstTimeIngest = false;
-            	lastProcessedIngestS3File = returned_item.get(IngestIO.COLUMN_FILE_NAME).getS();
+            	lastProcessedIngestS3FilePath = new S3Path(returned_item.get(IngestIO.COLUMN_FILE_NAME).getS());
             	returned_item.forEach((column,attribute) -> ingestAuditrecordEntityVO.getRecords().put(column, attribute.getS()));
-            	IngestLogger.info("Last S3 Ingest file processed: "+lastProcessedIngestS3File);
+            	IngestLogger.info("Last S3 Ingest file processed: "+lastProcessedIngestS3FilePath.toString());
             }
-        }catch(Exception e) {
-        	IngestLogger.info("Exception while fetching last processed file info from audit table");
+        }
+        catch (Exception e) 
+        {
+        	IngestLogger.info ("Exception while fetching last processed file info from audit table");
         	throw new IngestException("Processing error detected",e);
         }
         
         	
     }
 
+    private void processAuditTable() {
+		try 
+		{
+			insertIngestAuditTableWithLatestProcessedFileInfo();
+			resetCompareVariable();
+			IngestLogger.info("Ingest audit history is updated");
+		} catch (IngestException e) {
+			IngestLogger.error("Failed to process ingest audit", e);
+		    throw new IngestRuntimeException("Failed to process audit", e);
+		}
+	}
     
-    
-    private void insertIngestTableWithLatestProcessedFileInfo() throws IngestException {
+    private void insertIngestAuditTableWithLatestProcessedFileInfo() throws IngestException {
     	List<WriteRequest> requests = new ArrayList<>();
     	int ingestTableEntryCount = isFirstTimeIngest?1:2;
     	try {
-    		for(int i=0;i<ingestTableEntryCount;i++) {
-        		if(isFirstTimeIngest || i==1) {
+    		for (int i=0;i<ingestTableEntryCount;i++) 
+    		{
+        		if(isFirstTimeIngest || i==1) 
+        		{
         			setFieldsForIngestTableRecord();
-        		}else if(i==0) {
+        		}
+        		else if(i==0) 
+        		{
         			ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_UPDATE_DATE, CommonUtil.getCurrentDateTime(new Date()));
         		}
         			
@@ -612,7 +653,9 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
         	
         	
         	dynamoDB.batchWrite(ingestTableName, requests);
-    	}catch (Exception e) {
+    	}
+    	catch (Exception e) 
+    	{
     		IngestLogger.info("Error happened while processign ingest audit record");
     		throw new IngestException("Error happened while processign ingest audit record::"+e.getMessage());
 		}
@@ -626,7 +669,8 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
      * @param line
      * @throws IOException
      */
-    private void compareRecordByAccountIdForDeltaChange(String accountNumber,String line) throws IOException {
+    private void compareRecordByAccountIdForDeltaChange (String accountNumber,String line) throws IOException 
+    {
 
     	char [] buffer = new char[1];
     	boolean newRecord = true;
@@ -646,11 +690,12 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
     	 *** In this case new line will not be read from old file, rather last processed line will picked up again for comparison
     	 * lastLineRead=> This will hold the last line read. 
     	 */
-    	if(lastCompareStatus.equals(IngestIO.DB_OPERATION_INSERT)) {
+    	if (IngestIO.COMPARE_STATUS.INSERT.equals(Last_Compare_Status)) 
+    	{
     		String processedFileLine = lastLineRead.toString();
     		String [] values = processedFileLine.split(",");
     		StringBuffer sb = new StringBuffer();
-    		for(int i = 0; i < values.length; i++) 
+    		for (int i = 0; i < values.length; i++) 
     		{
     	         sb.append(values[i]);
     	    }
@@ -665,9 +710,12 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
     	 * Start the next comparison from the next line in old file
     	 */
     	else {
-    		while (processedFileReader.read(buffer) != -1) {
-        		if(buffer[0] == '\n') {
-        			if(isHeader) {
+    		while (processedFileReader.read(buffer) != -1) 
+    		{
+        		if(buffer[0] == '\n') 
+        		{
+        			if (isHeader) 
+        			{
         				IngestLogger.info("Skipping the header for processed file");
         				isHeader = false;
         				continue;
@@ -679,12 +727,16 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
         			processedFileBuilder.setLength(0);
         			break;
         		}
-        		if(!isHeader)
+        		if (!isHeader)
+        		{
         			processedFileBuilder.append(buffer);
+        		}
+        			
         	}
     		
     		// Processing the last record in old file
-    		if(processedFileBuilder.length() > 0) {
+    		if (processedFileBuilder.length() > 0) 
+    		{
         		String processedFileLine = processedFileBuilder.toString().trim();
     			String [] values = line.split(",");
     			String processedAccountNumber = values[IngestIO.INDEX_ACCOUNTID];
@@ -694,12 +746,19 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
     	}
     	
     		
-    	if(newRecord) {
-    		lastCompareStatus = IngestIO.DB_OPERATION_INSERT;
-    		
+    	if(newRecord) 
+    	{
+    		Last_Compare_Status = IngestIO.COMPARE_STATUS.INSERT;
     	}
-    
-    
+    	
+    	if (IngestIO.COMPARE_STATUS.INSERT.equals(Last_Compare_Status))
+    	{
+    		recordInsertCount++;
+    	}
+    	else if (IngestIO.COMPARE_STATUS.UPDATE.equals(Last_Compare_Status))
+    	{
+    		recordUpdateCount++;
+    	}
     }
     
     /**
@@ -711,27 +770,35 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
      * @param processedAccountNumber
      * @return
      */
-    private boolean compareRecord(String accountNumber, String line, String processedFileLine,
-			String processedAccountNumber) {
+    private boolean compareRecord (String accountNumber, String line, String processedFileLine,
+			String processedAccountNumber) 
+    {
 		boolean newRecord=false;
-		if(StringUtils.isNotEmpty(processedAccountNumber))
+		if (StringUtils.isNotEmpty(processedAccountNumber))
 		{
-			if(Integer.parseInt(processedAccountNumber) == Integer.parseInt(accountNumber)) {
-				
-				if(line.hashCode() == processedFileLine.hashCode()) {
-					lastCompareStatus = IngestIO.DB_OPERATION_NOACTION;
-				}else {
-					lastCompareStatus = IngestIO.DB_OPERATION_UPDATE;
+			if (Integer.parseInt(processedAccountNumber) == Integer.parseInt(accountNumber)) 
+			{
+				if (StringUtils.equals(line, processedFileLine))
+				{
+					Last_Compare_Status = IngestIO.COMPARE_STATUS.NOACTION;
+				}
+				else 
+				{
+					Last_Compare_Status = IngestIO.COMPARE_STATUS.UPDATE;
 				}
 				
-			}else{
+			}
+			else
+			{
 				newRecord = true;
-				lastCompareStatus = IngestIO.DB_OPERATION_INSERT;
+				Last_Compare_Status = IngestIO.COMPARE_STATUS.INSERT;
 				lastLineRead.setLength(0);
 				lastLineRead.append(processedFileLine);
 			}
 			
-		}else {
+		}
+		else 
+		{
 			newRecord = false;
 			
 		}
@@ -744,18 +811,21 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
      * Table: <env>-ftacel-ingest-ddb
      * Columns: IngestId/Reocrds count/Create-Update date
      */
-    private void setFieldsForIngestTableRecord() {
+    private void setFieldsForIngestTableRecord () 
+    {
     	
     	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_RECORD_COUNT, String.valueOf(recordCount));
     	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INSERT_COUNT, String.valueOf(recordInsertCount));
     	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_CREATE_DATE, CommonUtil.getCurrentDateTime(new Date()));
     	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_UPDATE_DATE, ingestAuditrecordEntityVO.getRecords().get(IngestIO.COLUMN_CREATE_DATE));
     	
-    	if(!isFirstTimeIngest) {
-			ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3File);
-			ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.STATUS_CURRENT);
+    	if (!isFirstTimeIngest) 
+    	{
+			ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3FilePath.toString());
+			ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.FILE_AUDIT_STATUS.CURRENT.toString());
 			ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_UPDATE_COUNT, String.valueOf(recordUpdateCount));
 			ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_NO_CHANGE, String.valueOf(recordNoChangeCount));
+			ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_STATUS, IngestIO.FILE_AUDIT_STATUS.COMPLETED.toString());
 		}
 		
 		
@@ -764,7 +834,7 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
     /**
      * Clear all cache for ingest
      */
-    private void cleanupIngestCache()
+    private void cleanupIngestCache ()
     {
         IngestLogger.info("Cleaning up failed ingest after error");
         inbound.clear();
@@ -779,11 +849,12 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
      * Cache clear
      * This will reset all variables for file compare to default value for next time use
      */
-    private void resetCompareVariable() {
+    private void resetCompareVariable () 
+    {
     	isFirstTimeIngest = false;
-    	lastProcessedIngestS3File = "";
-        currentProcessingIngestS3File = "";
-        lastCompareStatus = "";
+    	lastProcessedIngestS3FilePath = null;
+        currentProcessingIngestS3FilePath = null;
+        Last_Compare_Status = null;
         ingestAuditrecordEntityVO =  new RecordEntityVO();
         recordCount=0;
         recordInsertCount = 0;
@@ -794,7 +865,8 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
         isHeader = true;
     }
     
-    private BufferedReader decryptS3File(S3ObjectInputStream in) throws NoSuchProviderException, IOException {
+    private BufferedReader decryptS3File (S3ObjectInputStream in) throws NoSuchProviderException, IOException 
+    {
     	InputStream plaintextStream = BouncyGPG
                 .decryptAndVerifyStream()
                 .withConfig(keyringConfig)
@@ -804,10 +876,12 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
              return s3Reader;
     }
     
-    private BufferedReader loadBufferReaderFromS3Bucket(String bucket, String fileName) throws IngestException{
-	    	
-	    	try {
-	    		S3Object s3Object = s3Manager.getObject(new S3Path(bucket, fileName));
+    private BufferedReader loadBufferReaderFromS3Bucket (S3Path s3Path) throws IngestException
+    {
+	    	try 
+	    	{
+	    		S3Object s3Object = s3Manager.getObject(s3Path);
+	    		s3ObjectsList.add(s3Object);
 	        	InputStream plaintextStream = BouncyGPG
 	                    .decryptAndVerifyStream()
 	                    .withConfig(keyringConfig)
@@ -815,12 +889,43 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
 	                    .fromEncryptedInputStream(s3Object.getObjectContent());
 	                 BufferedReader processedFileReader = new BufferedReader(new InputStreamReader(plaintextStream), 65536);
 	                 return processedFileReader;
-	    	}catch (Exception e) {
-				IngestLogger.info("Could not read from S3 bucket:"+bucket+" for the file:"+fileName);
-				throw new IngestException("Could not read from S3 bucket:"+bucket+" for the file:"+fileName);
+	    	}
+	    	catch (Exception e) 
+	    	{
+				IngestLogger.info("Could not read from S3 bucket:"+s3Path.getBucket()+" for the file:"+s3Path.getKey());
+				throw new IngestException("Could not read from S3 bucket:"+s3Path.getBucket()+" for the file:"+s3Path.getKey());
 			}
 	    	
-	    }
+    }
+    
+    private void inesertAuditForIngest (S3Path currentProcessingIngestS3FilePath, String status) throws IngestException
+    {
+		List<WriteRequest> requests = new ArrayList<>();
+    	try {
+    		HashMap<String,AttributeValue> itemValues = new HashMap<String,AttributeValue>();
+    		IngestIO.COLUMN_AUDIT_INGEST_TABLE.forEach((column)-> {
+    			itemValues.put(column, new AttributeValue().withS(
+    					IngestIO.COLUMN_INGEST_ID.equals(column)?CommonUtil.getUUID():
+    						IngestIO.COLUMN_FILE_NAME.equals(column)?currentProcessingIngestS3FilePath.toString():
+    							IngestIO.COLUMN_CREATE_DATE.equals(column) || IngestIO.COLUMN_UPDATE_DATE.equals(column)?CommonUtil.getCurrentDateTime(new Date()):
+    								IngestIO.COLUMN_STATUS.equals(column)?status:IngestIO.VALUE_HYPHEN));
+    			});
+			
+        	PutRequest putRequest = new PutRequest(itemValues);
+        	WriteRequest writeRequest = new WriteRequest(putRequest);
+        	requests.add(writeRequest);
+        	
+        	
+        	dynamoDB.batchWrite(ingestTableName, requests);
+    	}
+    	catch (Exception e) 
+    	{
+    		IngestLogger.info("Error happened while processign ingest audit record");
+    		throw new IngestException("Error happened while processign ingest audit record::"+e.getMessage());
+		}
+    	
+	
+	}
    
 }
 

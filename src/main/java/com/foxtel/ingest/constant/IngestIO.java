@@ -27,24 +27,41 @@ public interface IngestIO {
 	public final String COLUMN_UPDATE_COUNT = "UpdateCount";
 	public final String COLUMN_CREATE_DATE = "CreateDate";
 	public final String COLUMN_UPDATE_DATE = "UpdateDate";
-	public final ArrayList<String> COLUMN_AUDIT_INGEST_TABLE = new ArrayList<String>() {{
+	public final String COLUMN_STATUS= "Status";
+	public final ArrayList<String> COLUMN_AUDIT_INGEST_TABLE = new ArrayList<String>() 
+			{{
 			    add(COLUMN_INGEST_ID);
 			    add(COLUMN_FILE_NAME);
 			    add(COLUMN_INSERT_COUNT);
 			    add(COLUMN_NO_CHANGE);
 			    add(COLUMN_RECORD_COUNT);
 			    add(COLUMN_UPDATE_COUNT);
+			    add(COLUMN_STATUS);
 			    add(COLUMN_CREATE_DATE);
 			    add(COLUMN_UPDATE_DATE);
 			}};
 	
-	public final String STATUS_CURRENT = "CURRENT";
-	public final String STATUS_ARCHIVE = "ARCHIVE";
-	public final String STATUS_UN_PROCESSED = "UNPROCESSED";
+	public enum FILE_AUDIT_STATUS 
+	{
+		READY,
+		RUNNING,
+		ERROR,
+		PROCESSED,
+		UNPROCESSED,
+		COMPLETED,
+		CURRENT,
+		ARCHIVE,
+	}
 	
-	public final String DB_OPERATION_INSERT = "INSERT";
-	public final String DB_OPERATION_UPDATE = "UPDATE";
-	public final String DB_OPERATION_NOACTION = "NOACTION";
+	public enum COMPARE_STATUS {
+			INSERT,
+			UPDATE,
+			NOACTION
+	};
+	
+	//public final String DB_OPERATION_INSERT = "INSERT";
+	//public final String DB_OPERATION_UPDATE = "UPDATE";
+	//public final String DB_OPERATION_NOACTION = "NOACTION";
 	public final String VALUE_HYPHEN = "-";
 	
 	public final String ENV_VARIABLE_REGION = "REGION";
