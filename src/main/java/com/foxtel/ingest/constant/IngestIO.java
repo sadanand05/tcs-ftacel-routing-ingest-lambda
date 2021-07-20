@@ -59,9 +59,6 @@ public interface IngestIO {
 			NOACTION
 	};
 	
-	//public final String DB_OPERATION_INSERT = "INSERT";
-	//public final String DB_OPERATION_UPDATE = "UPDATE";
-	//public final String DB_OPERATION_NOACTION = "NOACTION";
 	public final String VALUE_HYPHEN = "-";
 	
 	public final String ENV_VARIABLE_REGION = "REGION";

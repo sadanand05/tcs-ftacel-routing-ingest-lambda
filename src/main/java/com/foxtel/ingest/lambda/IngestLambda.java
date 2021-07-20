@@ -226,7 +226,7 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
         String key = record.getS3().getObject().getKey();
         currentProcessingIngestS3FilePath = new S3Path(bucket, key);
         
-        inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.READY.toString()); //Insert new status with Ready in Audit ingest table
+        insertAuditStatusForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.READY.toString()); //Insert new status with Ready in Audit ingest table
         
         processObject(currentProcessingIngestS3FilePath);
     }
@@ -274,30 +274,30 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
             }
             
             //Insert new status with Running in Audit ingest table
-            inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.RUNNING.toString());
+            insertAuditStatusForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.RUNNING.toString());
             
             processStream(inputPath, s3Object.getObjectContent());
             
             //Insert new status with Running in Audit ingest table
-            inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.PROCESSED.toString());
+            insertAuditStatusForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.PROCESSED.toString());
             
             IngestLogger.info("Ingest procssing is complete. Audit table is getting updated");
             
-            processAuditTable();
+            processFinalAuditAfterIngest();
             
         }
         catch (IngestException e)
         {
         	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.FILE_AUDIT_STATUS.ERROR+"_"+currentProcessingIngestS3FilePath.getKey());
             ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3FilePath.toString());
-            inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.ERROR.toString());
+            insertAuditStatusForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.ERROR.toString());
             throw e;
         }
         catch (Throwable t)
         {
         	ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_INGEST_ID, IngestIO.FILE_AUDIT_STATUS.ERROR+"_"+currentProcessingIngestS3FilePath.getKey());
             ingestAuditrecordEntityVO.getRecords().put(IngestIO.COLUMN_FILE_NAME, currentProcessingIngestS3FilePath.toString());
-            inesertAuditForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.ERROR.toString());
+            insertAuditStatusForIngest(currentProcessingIngestS3FilePath,IngestIO.FILE_AUDIT_STATUS.ERROR.toString());
             throw new IngestException("Failed to ingest: " + inputPath, t);
         }
         finally
@@ -614,7 +614,7 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
         	
     }
 
-    private void processAuditTable() {
+    private void processFinalAuditAfterIngest() {
 		try 
 		{
 			insertIngestAuditTableWithLatestProcessedFileInfo();
@@ -898,7 +898,7 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
 	    	
     }
     
-    private void inesertAuditForIngest (S3Path currentProcessingIngestS3FilePath, String status) throws IngestException
+    private void insertAuditStatusForIngest (S3Path currentProcessingIngestS3FilePath, String status) throws IngestException
     {
 		List<WriteRequest> requests = new ArrayList<>();
     	try {
@@ -908,7 +908,13 @@ public class IngestLambda implements RequestHandler<SQSEvent, Void>
     					IngestIO.COLUMN_INGEST_ID.equals(column)?CommonUtil.getUUID():
     						IngestIO.COLUMN_FILE_NAME.equals(column)?currentProcessingIngestS3FilePath.toString():
     							IngestIO.COLUMN_CREATE_DATE.equals(column) || IngestIO.COLUMN_UPDATE_DATE.equals(column)?CommonUtil.getCurrentDateTime(new Date()):
-    								IngestIO.COLUMN_STATUS.equals(column)?status:IngestIO.VALUE_HYPHEN));
+    								IngestIO.FILE_AUDIT_STATUS.PROCESSED.toString().equals(status)?
+    									IngestIO.COLUMN_RECORD_COUNT.equals(column)?String.valueOf(recordCount):
+    										IngestIO.COLUMN_INSERT_COUNT.equals(column)?String.valueOf(recordInsertCount):
+    											IngestIO.COLUMN_UPDATE_COUNT.equals(column)?String.valueOf(recordUpdateCount):
+    												IngestIO.COLUMN_NO_CHANGE.equals(column)?String.valueOf(recordNoChangeCount):
+    													IngestIO.COLUMN_STATUS.equals(column)?status:IngestIO.VALUE_HYPHEN :
+    									IngestIO.COLUMN_STATUS.equals(column)?status:IngestIO.VALUE_HYPHEN));
     			});
 			
         	PutRequest putRequest = new PutRequest(itemValues);
