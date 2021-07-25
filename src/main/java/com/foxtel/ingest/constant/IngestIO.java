@@ -28,6 +28,7 @@ public interface IngestIO {
 	public final String COLUMN_CREATE_DATE = "CreateDate";
 	public final String COLUMN_UPDATE_DATE = "UpdateDate";
 	public final String COLUMN_STATUS= "Status";
+	public final String COLUMN_PROCESSING_TIME = "ProcessingTimeInSec";
 	public final ArrayList<String> COLUMN_AUDIT_INGEST_TABLE = new ArrayList<String>() 
 			{{
 			    add(COLUMN_INGEST_ID);
@@ -39,6 +40,7 @@ public interface IngestIO {
 			    add(COLUMN_STATUS);
 			    add(COLUMN_CREATE_DATE);
 			    add(COLUMN_UPDATE_DATE);
+			    add(COLUMN_PROCESSING_TIME);
 			}};
 	
 	public enum FILE_AUDIT_STATUS 
@@ -59,7 +61,9 @@ public interface IngestIO {
 			NOACTION
 	};
 	
+	
 	public final String VALUE_HYPHEN = "-";
+	public final String VALUE_ZERO = "0";
 	
 	public final String ENV_VARIABLE_REGION = "REGION";
 	public final String ENV_VARIABLE_CUSTOMER_TABLE_NAME = "CUSTOMER_TABLE_NAME";
@@ -67,6 +71,8 @@ public interface IngestIO {
 	public final String ENV_VARIABLE_THREAD_COUNT = "THREAD_COUNT";
 	public final String ENV_VARIABLE_KEY_SECRETS_MANAGER_KEY_ARN = "SECRETS_MANAGER_KEY_ARN";
 	public final String ENV_VARIABLE_KEY_SECRETS_MANAGER_PASSPHRASE_ARN = "SECRETS_MANAGER_PASSPHRASE_ARN";
+
+	
 	
 
 }

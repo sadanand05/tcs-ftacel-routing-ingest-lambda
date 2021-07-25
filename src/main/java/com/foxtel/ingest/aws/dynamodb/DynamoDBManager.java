@@ -202,4 +202,47 @@ public class DynamoDBManager
             // Ignored
         }
     }
+    
+    /**
+     * Puts an item from DynamoDB
+     * @param tableName the table name
+     * @param request  the request
+     * @return the loaded item
+     * @throws IngestException thrown on failure
+     */
+    public Map<String, AttributeValue> putItem(final String tableName, PutItemRequest request) throws IngestException
+    {
+        DynamoDBAction<Map<String, AttributeValue>> putItem = new DynamoDBAction<Map<String, AttributeValue>>()
+        {
+            private PutItemRequest request = null;
+
+            public void setData(Object data)
+            {
+                this.request = (PutItemRequest) data;
+            }
+
+            public boolean isComplete()
+            {
+                return true;
+            }
+
+            public Map<String, AttributeValue> execute() throws IngestException
+            {
+            	PutItemResult result = dynamoDB.putItem(this.request);
+                return result.getAttributes();
+            }
+
+            public String getName()
+            {
+                return "Inserting item from DynamoDB table: " + tableName;
+            }
+        };
+
+        putItem.setData(request);
+
+        // Keep writing while we are not complete
+        return executeAction(putItem);
+    }
+    
+    
 }
