@@ -8,9 +8,7 @@ Parameters:
   StageName:
     Type: String
     AllowedValues:
-      - dev
-      - test
-      - prod
+      - tcsdev
     Description: 'The stage of deployment'
 
   ThreadCount:
